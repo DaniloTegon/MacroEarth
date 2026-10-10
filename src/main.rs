@@ -219,7 +219,7 @@ impl StratagemMacrosApp {
         let rows = rows.clamp(1, Self::MAX_GRID_DIMENSION) as f32;
         let columns = columns.clamp(1, Self::MAX_GRID_DIMENSION) as f32;
         let width = 78.0 + columns * 74.0;
-        let height = 154.0 + rows * 74.0;
+        let height = 194.0 + rows * 74.0;
         egui::vec2(width, height)
     }
 
@@ -937,6 +937,29 @@ impl eframe::App for StratagemMacrosApp {
         );
         ctx.set_visuals(egui::Visuals::dark());
 
+        egui::TopBottomPanel::bottom("creator-signature")
+            .exact_height(40.0)
+            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(8, 10, 11)))
+            .show(ctx, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Image::from_bytes(
+                            "bytes://cybeduck-thumbnail.png",
+                            include_bytes!("../assets/cybeduck_thumbnail.png"),
+                        )
+                        .fit_to_exact_size(egui::vec2(30.0, 30.0))
+                        .alt_text("Danilo Cybeduck Tegon"),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Created by Danilo 'Cybeduck' Tegon")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(190, 194, 194)),
+                    );
+                });
+            });
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(8, 10, 11)))
             .show(ctx, |ui| {
@@ -1218,8 +1241,8 @@ fn test_grid_bounds_and_window_size_are_responsive() {
     let largest = StratagemMacrosApp::grid_window_size(10, 10);
     assert!(largest.x > smallest.x);
     assert!(largest.y > smallest.y);
-    assert_eq!(smallest, egui::vec2(152.0, 228.0));
-    assert_eq!(largest, egui::vec2(818.0, 894.0));
+    assert_eq!(smallest, egui::vec2(152.0, 268.0));
+    assert_eq!(largest, egui::vec2(818.0, 934.0));
 }
 
 #[test]
@@ -1258,7 +1281,7 @@ fn test_grid_starts_with_four_rows_and_columns() {
     assert!(app.cells.iter().all(|row| row.len() == 4));
     assert_eq!(
         StratagemMacrosApp::grid_window_size(app.rows, app.columns),
-        egui::vec2(374.0, 450.0)
+        egui::vec2(374.0, 490.0)
     );
 }
 
