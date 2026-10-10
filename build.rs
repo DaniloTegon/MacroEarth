@@ -35,6 +35,10 @@ fn main() {
     resources
         .compile()
         .expect("failed to embed MacroEarth icon");
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+        let resource_object = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("resource.o");
+        println!("cargo:rustc-link-arg-bins={}", resource_object.display());
+    }
 }
 
 fn create_ico(tree: &resvg::Tree) -> Vec<u8> {

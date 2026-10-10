@@ -3,6 +3,10 @@ name = "helldivers-stratagem-macros"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "MacroEarth"
+path = "src/main.rs"
+
 [dependencies]
 eframe = "0.31"
 egui_extras = { version = "0.31", features = ["svg", "image"] }
