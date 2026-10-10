@@ -1,0 +1,21 @@
+[package]
+name = "helldivers-stratagem-macros"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.31"
+egui_extras = { version = "0.31", features = ["svg", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+resvg = "0.37"
+windows-sys = { version = "0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+
+[build-dependencies]
+resvg = "0.37"
+winres = "0.1"
