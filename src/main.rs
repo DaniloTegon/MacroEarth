@@ -8,18 +8,17 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
 use windows_sys::{
-    Win32::Foundation::CloseHandle,
-    Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-    },
+    Win32::Foundation::GetLastError,
     Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-        KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, MapVirtualKeyW, SendInput, VK_A,
-        VK_D, VK_DOWN, VK_LCONTROL, VK_LEFT, VK_RIGHT, VK_S, VK_UP, VK_W,
+        KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, MOD_NOREPEAT, MapVirtualKeyW,
+        RegisterHotKey, SendInput, UnregisterHotKey, VK_A, VK_D, VK_DOWN, VK_LCONTROL, VK_LEFT,
+        VK_RIGHT, VK_S, VK_UP, VK_W,
     },
     Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, LWA_ALPHA,
-        SetLayeredWindowAttributes, SetWindowLongPtrW, WS_EX_LAYERED,
+        GWL_EXSTYLE, GetMessageW, GetWindowLongPtrW, KillTimer, LWA_ALPHA, MSG, PM_NOREMOVE,
+        PeekMessageW, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, WM_HOTKEY, WM_TIMER,
+        WS_EX_LAYERED,
     },
 };
 
@@ -197,6 +196,36 @@ struct HotkeyConfig {
     use_arrow_keys: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct SavedMacroCell {
+    stratagem_index: Option<usize>,
+    shortcut: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct SavedAppConfig {
+    rows: usize,
+    columns: usize,
+    cells: Vec<Vec<SavedMacroCell>>,
+    use_arrow_keys: bool,
+    enabled_stratagems: Vec<bool>,
+    show_disabled_stratagems: bool,
+}
+
+impl SavedAppConfig {
+    fn path() -> Option<std::path::PathBuf> {
+        std::env::var_os("APPDATA")
+            .or_else(|| std::env::var_os("LOCALAPPDATA"))
+            .map(std::path::PathBuf::from)
+            .map(|directory| directory.join("MacroEarth").join("settings.json"))
+    }
+
+    fn load() -> Option<Self> {
+        let contents = std::fs::read(Self::path()?).ok()?;
+        serde_json::from_slice(&contents).ok()
+    }
+}
+
 struct CellClicks {
     tile: bool,
     tile_drag_started: bool,
@@ -213,6 +242,7 @@ struct CellOutput {
 
 struct StratagemMacrosApp {
     hotkeys: Arc<Mutex<HotkeyConfig>>,
+    last_saved_settings: Option<SavedAppConfig>,
     drag_source: Option<(usize, usize)>,
     use_arrow_keys: bool,
     rows: usize,
@@ -227,17 +257,49 @@ struct StratagemMacrosApp {
 
 impl Default for StratagemMacrosApp {
     fn default() -> Self {
-        let rows = 4;
-        let columns = 4;
+        let saved = SavedAppConfig::load();
+        let rows = saved
+            .as_ref()
+            .map_or(4, |settings| settings.rows)
+            .clamp(1, Self::MAX_GRID_DIMENSION);
+        let columns = saved
+            .as_ref()
+            .map_or(4, |settings| settings.columns)
+            .clamp(1, Self::MAX_GRID_DIMENSION);
+        let mut cells = vec![vec![MacroCell::default(); columns]; rows];
+        if let Some(settings) = &saved {
+            for (row_index, row) in settings.cells.iter().take(rows).enumerate() {
+                for (column_index, saved_cell) in row.iter().take(columns).enumerate() {
+                    let cell = &mut cells[row_index][column_index];
+                    cell.stratagem_index = saved_cell
+                        .stratagem_index
+                        .filter(|index| *index < STRATAGEMS.len());
+                    cell.shortcut = saved_cell
+                        .shortcut
+                        .as_deref()
+                        .and_then(egui::Key::from_name);
+                }
+            }
+        }
+        let enabled_stratagems = saved
+            .as_ref()
+            .filter(|settings| settings.enabled_stratagems.len() == STRATAGEMS.len())
+            .map(|settings| settings.enabled_stratagems.clone())
+            .unwrap_or_else(|| vec![true; STRATAGEMS.len()]);
         Self {
             hotkeys: Default::default(),
+            last_saved_settings: None,
             drag_source: None,
-            use_arrow_keys: false,
+            use_arrow_keys: saved
+                .as_ref()
+                .is_some_and(|settings| settings.use_arrow_keys),
             rows,
             columns,
-            cells: vec![vec![MacroCell::default(); columns]; rows],
-            enabled_stratagems: vec![true; STRATAGEMS.len()],
-            show_disabled_stratagems: false,
+            cells,
+            enabled_stratagems,
+            show_disabled_stratagems: saved
+                .as_ref()
+                .is_some_and(|settings| settings.show_disabled_stratagems),
             show_settings_window: false,
             show_selector: None,
             show_selector_just_opened: false,
@@ -260,6 +322,46 @@ impl StratagemMacrosApp {
 
     fn adjust_grid_dimension(current: usize, delta: isize) -> usize {
         (current as isize + delta).clamp(1, Self::MAX_GRID_DIMENSION as isize) as usize
+    }
+
+    fn persist_settings_if_changed(&mut self) {
+        let settings = SavedAppConfig {
+            rows: self.rows,
+            columns: self.columns,
+            cells: self
+                .cells
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| SavedMacroCell {
+                            stratagem_index: cell.stratagem_index,
+                            shortcut: cell.shortcut.map(|key| key.name().to_owned()),
+                        })
+                        .collect()
+                })
+                .collect(),
+            use_arrow_keys: self.use_arrow_keys,
+            enabled_stratagems: self.enabled_stratagems.clone(),
+            show_disabled_stratagems: self.show_disabled_stratagems,
+        };
+        if self.last_saved_settings.as_ref() == Some(&settings) {
+            return;
+        }
+
+        let Some(path) = SavedAppConfig::path() else {
+            return;
+        };
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        if let Ok(contents) = serde_json::to_vec_pretty(&settings) {
+            if std::fs::write(path, contents).is_ok() {
+                self.last_saved_settings = Some(settings);
+            }
+        }
     }
 
     fn stratagem_icon(stratagem: &Stratagem, size: f32) -> egui::Image<'static> {
@@ -964,6 +1066,11 @@ impl StratagemMacrosApp {
                 let stratagem = STRATAGEMS.get(cell.stratagem_index?)?;
                 Some((key, stratagem.sequence))
             })
+            .flat_map(|(key, sequence)| {
+                // egui has no numpad variants, so digits also bind the numpad VK.
+                let numpad = (0x30..=0x39).contains(&key).then(|| (key + 0x30, sequence));
+                std::iter::once((key, sequence)).chain(numpad)
+            })
             .collect();
         let config = HotkeyConfig {
             bindings,
@@ -971,6 +1078,20 @@ impl StratagemMacrosApp {
         };
         if let Ok(mut current) = self.hotkeys.lock() {
             if *current != config {
+                #[cfg(target_os = "windows")]
+                {
+                    let keys = config
+                        .bindings
+                        .iter()
+                        .map(|(vk, _)| format!("0x{vk:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    log_input_diagnostic(&format!(
+                        "Hotkey map synced: {} bindings [{keys}]; arrow_keys={}",
+                        config.bindings.len(),
+                        config.use_arrow_keys
+                    ));
+                }
                 *current = config;
             }
         }
@@ -1020,7 +1141,19 @@ fn virtual_key_for_egui_key(key: egui::Key) -> Option<u16> {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn press_key(vk: u16, down: bool) {
+fn log_input_diagnostic(message: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("macroearth-input.log"))
+    {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn press_key(vk: u16, down: bool) -> bool {
     let scan_code = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } as u16;
     let mut flags = KEYEVENTF_SCANCODE;
     if matches!(vk, VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT) {
@@ -1043,69 +1176,160 @@ unsafe fn press_key(vk: u16, down: bool) {
         },
     };
 
-    unsafe {
-        SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+    let sent = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+    if sent == 1 {
+        true
+    } else {
+        log_input_diagnostic(&format!(
+            "SendInput rejected vk=0x{vk:02X} down={down} last_error={}",
+            unsafe { GetLastError() }
+        ));
+        false
     }
 }
 
 #[cfg(target_os = "windows")]
-fn run_macro(sequence: &[&str], use_arrow_keys: bool) {
-    // Games drop inputs that arrive within the same frame.
-    const KEY_DELAY: std::time::Duration = std::time::Duration::from_millis(30);
+fn run_macro(sequence: &[&str], use_arrow_keys: bool) -> bool {
+    const MENU_OPEN_DELAY: std::time::Duration = std::time::Duration::from_millis(60);
+    const KEY_HOLD: std::time::Duration = std::time::Duration::from_millis(25);
+    const KEY_GAP: std::time::Duration = std::time::Duration::from_millis(25);
 
-    unsafe { press_key(VK_LCONTROL, true) };
-    std::thread::sleep(KEY_DELAY);
+    let mut accepted = unsafe { press_key(VK_LCONTROL, true) };
+    std::thread::sleep(MENU_OPEN_DELAY);
     for step in sequence {
         if let Some(vk) = virtual_key_for_step(step, use_arrow_keys) {
-            unsafe { press_key(vk, true) };
-            std::thread::sleep(KEY_DELAY);
-            unsafe { press_key(vk, false) };
-            std::thread::sleep(KEY_DELAY);
+            accepted &= unsafe { press_key(vk, true) };
+            std::thread::sleep(KEY_HOLD);
+            accepted &= unsafe { press_key(vk, false) };
+            std::thread::sleep(KEY_GAP);
         }
     }
-    unsafe { press_key(VK_LCONTROL, false) };
+    accepted &= unsafe { press_key(VK_LCONTROL, false) };
+    accepted
 }
 
 #[cfg(target_os = "windows")]
-fn key_is_down(vk: u16) -> bool {
-    (unsafe { GetAsyncKeyState(i32::from(vk)) } as u16) & 0x8000 != 0
+fn refresh_registered_hotkeys(config: &Arc<Mutex<HotkeyConfig>>, registered: &mut Vec<u16>) {
+    let mut desired = config
+        .lock()
+        .map(|config| {
+            config
+                .bindings
+                .iter()
+                .map(|(vk, _)| *vk)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    desired.sort_unstable();
+    desired.dedup();
+    if desired == *registered {
+        return;
+    }
+
+    for vk in registered.drain(..) {
+        unsafe { UnregisterHotKey(0, i32::from(vk)) };
+    }
+    for vk in desired {
+        if unsafe { RegisterHotKey(0, i32::from(vk), MOD_NOREPEAT, u32::from(vk)) } != 0 {
+            registered.push(vk);
+            log_input_diagnostic(&format!("Registered game hotkey vk=0x{vk:02X}"));
+        } else {
+            log_input_diagnostic(&format!(
+                "Could not register game hotkey vk=0x{vk:02X} last_error={}",
+                unsafe { GetLastError() }
+            ));
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn spawn_hotkey_thread(config: Arc<Mutex<HotkeyConfig>>) {
     std::thread::spawn(move || {
-        let mut was_down = [false; 256];
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(8));
+        let mut message: MSG = unsafe { std::mem::zeroed() };
+        unsafe { PeekMessageW(&mut message, 0, 0, 0, PM_NOREMOVE) };
+        let timer = unsafe { SetTimer(0, 0, 16, None) };
+        if timer == 0 {
+            log_input_diagnostic("Could not start global hotkey refresh timer");
+            return;
+        }
 
-            let mut triggered = None;
-            let mut use_arrow_keys = false;
-            if let Ok(config) = config.lock() {
-                use_arrow_keys = config.use_arrow_keys;
-                for (vk, sequence) in &config.bindings {
-                    let down = key_is_down(*vk);
-                    let previous = std::mem::replace(&mut was_down[usize::from(*vk & 0xFF)], down);
-                    if down && !previous && triggered.is_none() {
-                        triggered = Some(*sequence);
+        log_input_diagnostic("Global RegisterHotKey worker started");
+        let mut registered = Vec::new();
+        let mut was_down = [false; 256];
+        let mut last_fired: Option<(u16, std::time::Instant)> = None;
+        refresh_registered_hotkeys(&config, &mut registered);
+
+        loop {
+            let result = unsafe { GetMessageW(&mut message, 0, 0, 0) };
+            if result <= 0 {
+                break;
+            }
+
+            if message.message == WM_TIMER {
+                refresh_registered_hotkeys(&config, &mut registered);
+                let snapshot = config
+                    .lock()
+                    .ok()
+                    .map(|config| (config.bindings.clone(), config.use_arrow_keys));
+                if let Some((bindings, use_arrow_keys)) = snapshot {
+                    for (vk, sequence) in bindings {
+                        let down = key_is_down(vk);
+                        let previous =
+                            std::mem::replace(&mut was_down[usize::from(vk & 0xFF)], down);
+                        if down != previous {
+                            log_input_diagnostic(&format!(
+                                "Fallback key vk=0x{vk:02X} down={down}"
+                            ));
+                        }
+                        if !down || previous {
+                            continue;
+                        }
+
+                        let now = std::time::Instant::now();
+                        let duplicate = last_fired.is_some_and(|(last_vk, last_time)| {
+                            last_vk == vk
+                                && now.duration_since(last_time)
+                                    < std::time::Duration::from_millis(300)
+                        });
+                        if duplicate {
+                            continue;
+                        }
+                        last_fired = Some((vk, now));
+                        if run_macro(sequence, use_arrow_keys) {
+                            log_input_diagnostic("Fallback macro input accepted by Windows");
+                        } else {
+                            log_input_diagnostic("Fallback macro input rejected by Windows");
+                        }
                     }
                 }
-            }
+            } else if message.message == WM_HOTKEY {
+                let vk = message.wParam as u16;
+                let binding = config.lock().ok().and_then(|config| {
+                    config
+                        .bindings
+                        .iter()
+                        .find(|(binding_vk, _)| *binding_vk == vk)
+                        .map(|(_, sequence)| (*sequence, config.use_arrow_keys))
+                });
+                let Some((sequence, use_arrow_keys)) = binding else {
+                    continue;
+                };
 
-            let Some(sequence) = triggered else {
-                continue;
-            };
-            if !is_helldivers_frontmost() {
-                continue;
-            }
-            run_macro(sequence, use_arrow_keys);
-
-            // The macro's own keystrokes must not count as new presses.
-            if let Ok(config) = config.lock() {
-                for (vk, _) in &config.bindings {
-                    was_down[usize::from(*vk & 0xFF)] = key_is_down(*vk);
+                log_input_diagnostic(&format!("WM_HOTKEY vk=0x{vk:02X}"));
+                if run_macro(sequence, use_arrow_keys) {
+                    log_input_diagnostic("Macro input accepted by Windows");
+                } else {
+                    log_input_diagnostic("Macro input rejected by Windows");
                 }
+                last_fired = Some((vk, std::time::Instant::now()));
+                was_down[usize::from(vk & 0xFF)] = key_is_down(vk);
             }
         }
+
+        for vk in registered {
+            unsafe { UnregisterHotKey(0, i32::from(vk)) };
+        }
+        unsafe { KillTimer(0, timer) };
     });
 }
 
@@ -1121,37 +1345,8 @@ fn virtual_key_for_step(step: &str, use_arrow_keys: bool) -> Option<u16> {
 }
 
 #[cfg(target_os = "windows")]
-fn is_helldivers_frontmost() -> bool {
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground == 0 {
-        return false;
-    }
-
-    let mut pid = 0u32;
-    unsafe {
-        GetWindowThreadProcessId(foreground, &mut pid);
-    }
-    if pid == 0 {
-        return false;
-    }
-
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if process == 0 {
-        return false;
-    }
-
-    let mut buffer = [0u16; 512];
-    let mut size = buffer.len() as u32;
-    let ok = unsafe {
-        QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr() as *mut u16, &mut size)
-    };
-    unsafe { CloseHandle(process) };
-    if ok == 0 {
-        return false;
-    }
-
-    let exe_name = String::from_utf16_lossy(&buffer[..size as usize]);
-    exe_name.to_ascii_lowercase().ends_with("helldivers2.exe")
+fn key_is_down(vk: u16) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
 }
 
 #[cfg(target_os = "windows")]
@@ -1454,6 +1649,7 @@ impl eframe::App for StratagemMacrosApp {
             });
         self.show_selector_window(ctx);
         self.show_settings_window(ctx);
+        self.persist_settings_if_changed();
     }
 }
 
@@ -1605,6 +1801,41 @@ fn test_clear_removes_stratagem_and_shortcut() {
     };
     cell.clear();
     assert!(cell.stratagem_index.is_none() && cell.shortcut.is_none() && !cell.listening);
+}
+
+#[test]
+fn test_saved_config_roundtrip_preserves_hotkeys_and_grid() {
+    let config = SavedAppConfig {
+        rows: 2,
+        columns: 3,
+        cells: vec![
+            vec![
+                SavedMacroCell {
+                    stratagem_index: Some(7),
+                    shortcut: Some("F5".to_owned()),
+                },
+                SavedMacroCell {
+                    stratagem_index: None,
+                    shortcut: Some("Q".to_owned()),
+                },
+                SavedMacroCell {
+                    stratagem_index: None,
+                    shortcut: None,
+                },
+            ],
+            vec![SavedMacroCell {
+                stratagem_index: Some(2),
+                shortcut: Some("0".to_owned()),
+            }],
+        ],
+        use_arrow_keys: true,
+        enabled_stratagems: vec![true; STRATAGEMS.len()],
+        show_disabled_stratagems: true,
+    };
+
+    let serialized = serde_json::to_vec(&config).unwrap();
+    let restored: SavedAppConfig = serde_json::from_slice(&serialized).unwrap();
+    assert_eq!(restored, config);
 }
 
 #[test]
