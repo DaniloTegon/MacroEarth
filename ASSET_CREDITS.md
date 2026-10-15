@@ -7,3 +7,5 @@ Sixteen legacy stratagem SVGs in `assets/stratagems` are from the [Helldivers Wi
 The `reinforce.svg` fallback was created for this project. This application is an unofficial fan utility and is not affiliated with Arrowhead Game Studios or Sony Interactive Entertainment.
 
 `super_earth_emblem.svg` is a project-made vector adaptation of the emblem image supplied as a user reference. The official Super Earth icon is marked in copyright by its source and is not bundled here.
+
+`assets/fonts/BarlowSemiCondensed-Medium.ttf` is Barlow Semi Condensed by Jeremy Tribby, licensed under the SIL Open Font License 1.1 (see `assets/fonts/OFL.txt`). It is used as a freely redistributable stand-in for the game's proprietary UI font.

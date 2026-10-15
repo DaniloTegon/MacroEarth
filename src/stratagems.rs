@@ -370,7 +370,7 @@ const STRATAGEMS: &[Stratagem] = &[
     },
     Stratagem {
         category: "Supply",
-        department: "Castellanâ€™s Creed",
+        department: "Castellan's Creed",
         name: "40-K Meltagun",
         short_name: "Meltagun",
         icon: "40-k-meltagun.png",
