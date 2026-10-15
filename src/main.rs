@@ -909,7 +909,7 @@ fn is_helldivers_frontmost() -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn set_window_opacity(frame: &eframe::Frame, focused: bool) {
+fn set_window_opacity(frame: &eframe::Frame, game_frontmost: bool) {
     let Ok(window_handle) = frame.window_handle() else {
         return;
     };
@@ -923,7 +923,7 @@ fn set_window_opacity(frame: &eframe::Frame, focused: bool) {
         if extended_style & WS_EX_LAYERED as isize == 0 {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, extended_style | WS_EX_LAYERED as isize);
         }
-        SetLayeredWindowAttributes(hwnd, 0, if focused { u8::MAX } else { 242 }, LWA_ALPHA);
+        SetLayeredWindowAttributes(hwnd, 0, if game_frontmost { 242 } else { u8::MAX }, LWA_ALPHA);
     }
 }
 
@@ -931,11 +931,17 @@ impl eframe::App for StratagemMacrosApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui_extras::install_image_loaders(ctx);
         #[cfg(target_os = "windows")]
-        set_window_opacity(
-            frame,
-            ctx.input(|input| input.viewport().focused.unwrap_or(true)),
-        );
+        set_window_opacity(frame, is_helldivers_frontmost());
         ctx.set_visuals(egui::Visuals::dark());
+
+        // Click-through while the game is in front; Alt+Tab to MacroEarth makes it interactive.
+        #[cfg(target_os = "windows")]
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(
+                is_helldivers_frontmost(),
+            ));
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
 
         egui::TopBottomPanel::bottom("creator-signature")
             .exact_height(40.0)
